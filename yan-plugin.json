@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "id": "YanPlugin-we-need-reasoning",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "name": "We Need Reasoning",
-  "description": "把 DSH We Need 4.1.1 寄存器移植到 Yan：激活后在 127.0.0.1 启动反向代理，对 chat/completions、responses、messages 请求注入 seed、system register、工具步锚与压缩规则，未匹配模型原样透传。含 we-need 技能、seed 组合与寄存器审计工具；内置本地配置页可直接设置并持久化上游地址；需自行添加指向代理 Base URL 的自定义连接，插件不改模型配置。",
+  "description": "把 DSH We Need 4.1.1 寄存器移植到 Yan：激活后在 127.0.0.1 启动独立常驻反向代理 daemon，对 chat/completions、responses、messages 请求注入 seed、system register、工具步锚与压缩规则，未匹配模型原样透传。MCP/内核退出不会关闭代理；含 we-need 技能、seed 组合与寄存器审计工具；内置本地配置页可直接设置并持久化上游地址；需自行添加指向代理 Base URL 的自定义连接，插件不改模型配置。",
   "author": "Yan adaptation of DSH We Need Plugin contributors",
   "license": "MIT",
   "instructions": "instructions.md",
@@ -66,7 +66,7 @@
     },
     "listenPort": {
       "label": "本地监听端口",
-      "description": "代理只绑定 127.0.0.1。默认 8787，被占用时自动顺延最多 10 个端口。",
+      "description": "代理只绑定 127.0.0.1。默认 8787；端口固定，被占用时会明确报错，不再自动顺延。",
       "required": false,
       "default": "8787"
     },
@@ -96,7 +96,7 @@
     },
     "autoStart": {
       "label": "激活时自动启动代理",
-      "description": "true 时 MCP 服务启动即监听；false 时需调用 proxy_start。",
+      "description": "true 时 MCP 启动会确保独立 daemon 运行；false 时需调用 proxy_start。",
       "required": false,
       "default": "true"
     }

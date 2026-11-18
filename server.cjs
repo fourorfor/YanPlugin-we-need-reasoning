@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { createWeneedProxy, defaultConfigPath } = require('./lib/proxy');
+const daemon = require('./lib/daemon-control');
 const {
   SEED,
   SYSTEM_REGISTER,
@@ -15,7 +16,7 @@ const {
   matchesTarget
 } = require('./lib/registers');
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const UPSTREAM_VERSION = '4.1.1';
 
 function pick(value, allowed, fallback) {
@@ -23,9 +24,15 @@ function pick(value, allowed, fallback) {
   return allowed.includes(text) ? text : fallback;
 }
 
+function portFromEnv(value) {
+  if (value === undefined || value === '') return 8787;
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 0 && port <= 65535 ? port : 8787;
+}
+
 const config = {
   upstreamBaseUrl: String(process.env.WENEED_UPSTREAM_BASE_URL || ''),
-  port: Math.max(0, Math.min(65535, Number(process.env.WENEED_LISTEN_PORT) || 8787)),
+  port: portFromEnv(process.env.WENEED_LISTEN_PORT),
   targetModels: String(process.env.WENEED_TARGET_MODELS || 'deepseek,flash;weneed,ds41'),
   mode: pick(process.env.WENEED_MODE, ['standard', 'goal', 'team'], 'standard'),
   seedMode: pick(process.env.WENEED_SEED_MODE, ['upstream', 'task', 'off'], 'upstream'),
@@ -58,8 +65,12 @@ function seedHash() {
   return crypto.createHash('sha256').update(SEED).digest('hex');
 }
 
-function proxySummary() {
-  return proxy.status();
+function daemonConfig() {
+  return { ...proxy.config, configPath };
+}
+
+async function proxySummary() {
+  return daemon.status(daemonConfig());
 }
 
 const tools = [
@@ -108,7 +119,7 @@ const tools = [
   },
   {
     name: 'proxy_start',
-    description: '启动或重启本地 WeNeed 反向代理，只绑定 127.0.0.1。可传端口和上游 API 根地址；传入的上游与注入选项会保存到本地配置文件，下次启动继续生效。端口被占用时自动顺延。启动后把返回的 baseUrl 作为自定义连接 Base URL，或打开返回的 configUrl 在网页里直接配置。',
+    description: '启动或复用独立常驻的本地 WeNeed 反向代理 daemon，只绑定 127.0.0.1。可传端口和上游 API 根地址；传入的上游与注入选项会保存到本地配置文件，下次启动继续生效。端口固定，不自动顺延；被占用时会明确报错。启动后把返回的 baseUrl 作为自定义连接 Base URL，或打开返回的 configUrl 在网页里直接配置。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -124,17 +135,18 @@ const tools = [
   },
   {
     name: 'proxy_stop',
-    description: '停止本地 WeNeed 反向代理并释放端口。停用后经过该端口的连接会失败；不会修改 Yan 的连接配置。',
+    description: '停止独立常驻的 WeNeed 反向代理 daemon 并释放端口。MCP 或内核退出不会自动停止它，只有该工具或显式结束 daemon 才会停止。停用后经过该端口的连接会失败；不会修改 Yan 的连接配置。',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false }
   }
 ];
 
-function rulesPayload() {
+async function rulesPayload() {
+  const current = await proxySummary();
   return {
     ok: true,
     version: VERSION,
     upstreamVersion: UPSTREAM_VERSION,
-    note: 'Yan 插件不能 hook 宿主模型请求；本插件用 127.0.0.1 反向代理实现线级注入。注入是概率性引导，不是硬开关。',
+    note: 'Yan 插件不能 hook 宿主模型请求；本插件用 127.0.0.1 独立 daemon 反向代理实现线级注入。代理不随 MCP 或内核进程退出。注入是概率性引导，不是硬开关。',
     seed: {
       length: SEED.length,
       sha256: seedHash(),
@@ -149,16 +161,16 @@ function rulesPayload() {
       toolDescription: TOOL_DESC_GUIDANCE
     },
     config: {
-      upstreamBaseUrl: proxy.config.upstreamBaseUrl,
-      targetModels: proxy.config.targetModels,
-      mode: proxy.config.mode,
-      seedMode: proxy.config.seedMode,
-      seedLanguage: proxy.config.seedLanguage,
+      upstreamBaseUrl: current.upstreamBaseUrl,
+      targetModels: current.targetModels,
+      mode: current.mode,
+      seedMode: current.seedMode,
+      seedLanguage: current.seedLanguage,
       toolStepAnchor: proxy.config.toolStepAnchor,
       configPath,
-      configUrl: proxy.status().configUrl
+      configUrl: current.configUrl
     },
-    proxy: proxySummary()
+    proxy: current
   };
 }
 
@@ -182,7 +194,8 @@ async function callTool(name, args) {
     return result.ok === false ? result : { ok: true, ...result };
   }
   if (name === 'proxy_status') {
-    return { ok: true, ...proxySummary(), startupError };
+    const current = await proxySummary();
+    return { ok: true, ...current, startupError };
   }
   if (name === 'proxy_start') {
     const input = args || {};
@@ -192,31 +205,34 @@ async function callTool(name, args) {
     if (input.seedMode) patch.seedMode = pick(input.seedMode, ['upstream', 'task', 'off'], proxy.config.seedMode);
     if (input.seedLanguage) patch.seedLanguage = pick(input.seedLanguage, ['auto', 'zh', 'en'], proxy.config.seedLanguage);
     if (input.upstreamBaseUrl !== undefined) patch.upstreamBaseUrl = input.upstreamBaseUrl;
+    if (input.port !== undefined) {
+      const port = Number(input.port);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        return { ok: false, error: '端口无效' };
+      }
+      proxy.config.port = port;
+    }
     try {
       if (Object.keys(patch).length) proxy.saveConfig(patch);
     } catch (error) {
       startupError = error.message;
-      return { ok: false, error: error.message, ...proxySummary() };
+      return { ok: false, error: error.message, ...await proxySummary() };
     }
     try {
-      const state = await proxy.start({ port: input.port === undefined ? proxy.config.port : input.port });
+      const state = await daemon.start(daemonConfig());
       startupError = '';
       return {
         ok: true,
         ...state,
-        targetModels: proxy.config.targetModels,
-        mode: proxy.config.mode,
-        seedMode: proxy.config.seedMode,
-        seedLanguage: proxy.config.seedLanguage,
         setup: `浏览器打开 ${state.configUrl || 'http://127.0.0.1:8787/__weneed/'} 可直接配置并保存上游地址；然后在 Yan 设置 → 模型/连接中新增自定义连接：Base URL 填 ${state.baseUrl}，API 格式选 OpenAI（或 Responses），API Key 填上游可用的 key，模型 id 填要使用的模型；然后用该连接发起请求并再次查看 proxy_status。`
       };
     } catch (error) {
       startupError = error.message;
-      return { ok: false, error: error.message, ...proxySummary() };
+      return { ok: false, error: error.message, ...await proxySummary() };
     }
   }
   if (name === 'proxy_stop') {
-    const state = await proxy.stop();
+    const state = await daemon.stop(daemonConfig());
     return { ok: true, stopped: true, ...state };
   }
   return { ok: false, error: `未知工具：${name}` };
@@ -268,17 +284,18 @@ function serve() {
     }
   });
   process.stdin.on('end', () => {
-    proxy.stop().finally(() => process.exit(0));
+    // 代理由独立 daemon 持有，MCP 退出不能关闭 8787。
+    process.exit(0);
   });
 }
 
 if (String(process.env.WENEED_AUTO_START || 'true').toLowerCase() !== 'false') {
-  proxy.start().catch(error => { startupError = error.message; });
+  daemon.ensureStarted(daemonConfig()).catch(error => { startupError = error.message; });
 }
 
-process.on('SIGINT', () => { proxy.stop().finally(() => process.exit(0)); });
-process.on('SIGTERM', () => { proxy.stop().finally(() => process.exit(0)); });
+process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
 
 if (require.main === module) serve();
 
-module.exports = { tools, handle, callTool, proxy, config };
+module.exports = { tools, handle, callTool, proxy, daemon, config };

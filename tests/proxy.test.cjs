@@ -133,3 +133,23 @@ test('proxy: 注入后转发、非目标透传、GET /models、SSE 流、压缩�
   await proxy.stop();
   await close(upstream);
 });
+
+test('proxy: 固定端口被占用时不静默顺延', async () => {
+  const occupied = http.createServer((req, res) => res.end('occupied'));
+  const port = await listen(occupied);
+  const proxy = createWeneedProxy({
+    port,
+    upstreamBaseUrl: 'http://127.0.0.1:9/v1',
+    configPath: ''
+  });
+  try {
+    await assert.rejects(
+      () => proxy.start({ port, exactPort: true }),
+      /已被占用.*不会自动顺延/
+    );
+    assert.equal(proxy.status().running, false);
+  } finally {
+    await proxy.stop();
+    await close(occupied);
+  }
+});

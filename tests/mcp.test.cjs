@@ -15,7 +15,8 @@ async function startServer(configPath) {
       WENEED_AUTO_START: 'false',
       WENEED_UPSTREAM_BASE_URL: 'http://127.0.0.1:9/v1',
       WENEED_LISTEN_PORT: '0',
-      WENEED_CONFIG_PATH: configPath
+      WENEED_CONFIG_PATH: configPath,
+      WENEED_STATE_PATH: path.join(path.dirname(configPath), 'daemon.json')
     },
     stdio: ['pipe', 'pipe', 'pipe']
   });
@@ -59,6 +60,7 @@ test('MCP：握手、工具清单、seed/审计/状态/启停', async () => {
     });
     assert.equal(init.result.protocolVersion, '2025-03-26');
     assert.equal(init.result.serverInfo.name, 'We Need Reasoning');
+    assert.equal(init.result.serverInfo.version, '1.0.1');
 
     const list = await request('tools/list');
     const names = list.result.tools.map(tool => tool.name).sort();

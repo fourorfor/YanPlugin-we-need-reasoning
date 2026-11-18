@@ -1,13 +1,13 @@
 # We Need Reasoning for Yan
 
-这个插件把 DSH 的 We Need 4.1.1 寄存器移到 Yan。Yan 插件没有宿主级模型请求 hook，所以插件在**本地 HTTP 层**工作：激活后启动一个只绑定 `127.0.0.1` 的反向代理，把发往它的模型请求改写后再转发到真实上游。
+这个插件把 DSH 的 We Need 4.1.1 寄存器移到 Yan。Yan 插件没有宿主级模型请求 hook，所以插件在**本地 HTTP 层**工作：激活后确保一个只绑定 `127.0.0.1` 的独立常驻反向代理 daemon 在运行，把发往它的模型请求改写后再转发到真实上游。MCP 或 Yan 内核退出不会关闭这个 daemon。
 
 代理不是透明全局代理，也不会自动修改 Yan 的模型连接。必须由用户把一个自定义连接指向代理的 Base URL，请求才会经过它。
 
 ## 激活后先做
 
 1. 调用 `proxy_status`。确认 `running`、`baseUrl`（默认 `http://127.0.0.1:8787/v1`）、`configUrl` 和 `upstreamBaseUrl`。
-2. 如果 `running=false`，调用 `proxy_start`。端口被占用会自动顺延；也可传 `port`、`upstreamBaseUrl`。
+2. 如果 `running=false`，调用 `proxy_start`。端口固定，被占用时会明确报错，不会自动顺延；也可传 `port`、`upstreamBaseUrl`。MCP 或内核重启后先查 `proxy_status`，daemon 通常仍在运行。
 3. 打开 `proxy_status.configUrl`（默认 `http://127.0.0.1:8787/__weneed/`），填写真实上游 API 根地址并保存。保存后立即生效，并写入 `~/.weneed-reasoning/config.json`；下次启动不需要重填。页面不保存 API Key。
 4. 让用户在 Yan 的“设置 → 模型 / 连接”里新增（或复制）一个自定义连接：
    - **Base URL**：`proxy_status.baseUrl` 的完整值，例如 `http://127.0.0.1:8787/v1`
@@ -35,7 +35,7 @@
 
 常见问题：
 
-- `running=false`：MCP 未启动或端口全部被占用；调用 `proxy_start` 并读错误。
+- `running=false`：daemon 未运行或端口被占用；调用 `proxy_start` 并读错误。MCP/内核重启不会停 daemon；机器重启后需要重新激活插件或调用 `proxy_start`。
 - `stats.injected=0`：请求没经过代理（连接 Base URL 不对）、模型不匹配、或请求不是 JSON。
 - `upstreamBaseUrl` 为空或请求返回 502：打开 `configUrl` 填写上游地址并保存；也可调用 `proxy_start` 传 `upstreamBaseUrl`，两者都会持久化。
 - 添加连接时拉不到模型列表：上游可能不提供 `/models`；直接手动填模型 id。代理仍会转发 `/models`。
@@ -48,4 +48,4 @@
 
 ## 诚实边界
 
-这是概率性引导，不是硬开关；不能保证每次进入 We Need 寄存器，也不能保证模型在代理之外发起的请求被改写。不要向用户暴露 API key、请求体或完整上游地址中的凭据。注入计数是本地统计，不等于上游一定接受了改写后的内容。
+这是概率性引导，不是硬开关；不能保证每次进入 We Need 寄存器，也不能保证模型在代理之外发起的请求被改写。不要向用户暴露 API key、请求体或完整上游地址中的凭据。注入计数是本地统计，不等于上游一定接受了改写后的内容。daemon 能跨 MCP/内核重启存活，但不是操作系统服务；机器重启后仍需激活插件或调用 `proxy_start`。
