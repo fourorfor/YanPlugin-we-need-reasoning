@@ -37,7 +37,95 @@ test('chat: 无 system 时插入一条', () => {
   assert.equal(body.messages[1].role, 'assistant');
 });
 
-test('chat: 工具步只锚定，不新增消息', () => {
+test('chat: 默认零回撤单调前缀（U1 -> Tool1 -> Tool2 -> U2 前缀逐字节一致）', () => {
+  const sys = { role: 'system', content: 'sys for the user. Let me help.' };
+  const tools = [{ type: 'function', function: { name: 'read', description: 'Read a file for the user.' } }];
+  const u1 = { role: 'user', content: 'task 1' };
+  const a1 = { role: 'assistant', content: null, reasoning_content: 'We need read a.js.', tool_calls: [{ id: '1', type: 'function', function: { name: 'read', arguments: '{}' } }] };
+  const tr1 = { role: 'tool', tool_call_id: '1', content: 'content of a.js' };
+  const a2 = { role: 'assistant', content: '', reasoning_content: 'Need check b.js too.', tool_calls: [{ id: '2', type: 'function', function: { name: 'read', arguments: '{}' } }] };
+  const tr2 = { role: 'tool', tool_call_id: '2', content: 'content of b.js' };
+  const aFinal = { role: 'assistant', content: 'Done fixing.' };
+  const u2 = { role: 'user', content: 'task 2' };
+
+  const clone = x => JSON.parse(JSON.stringify(x));
+  const t1 = { messages: clone([sys, u1]), tools: clone(tools) };
+  const t2 = { messages: clone([sys, u1, a1, tr1]), tools: clone(tools) };
+  const t3 = { messages: clone([sys, u1, a1, tr1, a2, tr2]), tools: clone(tools) };
+  const t4 = { messages: clone([sys, u1, a1, tr1, a2, tr2, aFinal, u2]), tools: clone(tools) };
+
+  R.injectChat(t1, { seed: MARK });
+  R.injectChat(t2, { seed: MARK });
+  R.injectChat(t3, { seed: MARK });
+  R.injectChat(t4, { seed: MARK });
+
+  // t1 前缀严格等于 t2/t3/t4 的前 3 条（system + seed + U1）
+  assert.deepEqual(t2.messages.slice(0, t1.messages.length), t1.messages);
+  // t2 前缀严格等于 t3/t4 的前 5 条（含 A1 的 reasoning 镜像 + TR1）
+  assert.deepEqual(t3.messages.slice(0, t2.messages.length), t2.messages);
+  // t3 前缀严格等于 t4 的前 7 条（发新消息 U2 后 seed 仍在 U1 前，零回撤！）
+  assert.deepEqual(t4.messages.slice(0, t3.messages.length), t3.messages);
+  assert.equal(t4.messages[1].role, 'assistant');
+  assert.equal(t4.messages[1].content, MARK);
+  assert.equal(t4.messages[3].content, 'We need read a.js.');
+  assert.equal(t4.messages[5].content, 'Need check b.js too.');
+  assert.equal(t4.messages[7].content, 'Done fixing.');
+  assert.deepEqual(t2.tools, t1.tools);
+  assert.match(t1.tools[0].function.description, /the requester/);
+});
+
+test('chat: 激进模式（seedPosition=last-user + contentFill=seed-continue-reasoning + toolStepAnchor + nearestGuidance）', () => {
+  const body = {
+    messages: [
+      { role: 'system', content: 'sys for the user. Let me help.' },
+      { role: 'user', content: 'prev task' },
+      { role: 'assistant', content: null, reasoning_content: 'Need check prior file.', tool_calls: [{ id: '0', type: 'function', function: { name: 'read', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: '0', content: 'prev result' },
+      { role: 'assistant', content: 'Visible prior reply', reasoning_content: 'Need summarize.' },
+      { role: 'user', content: 'task' },
+      { role: 'assistant', content: '', reasoning_content: 'step plan', tool_calls: [{ id: '1', type: 'function', function: { name: 'read', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: '1', content: 'result' }
+    ],
+    tools: [
+      { type: 'function', function: { name: 'read', description: 'Read a file for the user.', parameters: { type: 'object', properties: { p: { type: 'string', description: 'Path the user gives' } } } } }
+    ]
+  };
+  const result = R.injectChat(body, {
+    seed: MARK,
+    seedPosition: 'last-user',
+    contentFill: 'seed-continue-reasoning',
+    toolStepAnchor: true,
+    nearestGuidance: 'both'
+  });
+  assert.equal(result.seedInjected, true);
+  assert.equal(result.anchorInjected, true);
+  assert.equal(result.contentFilled, 2);
+  assert.match(body.messages[0].content, /the requester/);
+  assert.match(body.messages[0].content, /We need help/);
+  assert.match(body.messages[0].content, /We need use the earlier WeNeed trace/);
+  assert.equal(body.messages[2].content, 'Need check prior file.');
+  assert.equal(body.messages[4].content, 'Visible prior reply');
+  assert.equal(body.messages[5].role, 'assistant');
+  assert.equal(body.messages[5].content, MARK);
+  assert.match(body.messages[7].content, /We need test the register/);
+  assert.match(body.messages[7].content, /Need continue the main work/);
+  assert.match(body.messages[7].content, /step plan$/);
+  assert.match(body.messages[7].reasoning_content, /Need continue from the tool result/);
+  assert.match(body.messages[7].reasoning_content, /Need continue from the latest result/);
+
+  const countBefore = body.messages.length;
+  const again = R.injectChat(body, {
+    seed: MARK,
+    seedPosition: 'last-user',
+    contentFill: 'seed-continue-reasoning',
+    toolStepAnchor: true,
+    nearestGuidance: 'both'
+  });
+  assert.equal(again.seedInjected, false);
+  assert.equal(body.messages.length, countBefore);
+});
+
+test('chat: 关闭 toolStepReseed / contentFill 时仅在 reasoning 锚定不新增消息', () => {
   const body = {
     messages: [
       { role: 'system', content: 'sys' },
@@ -46,13 +134,27 @@ test('chat: 工具步只锚定，不新增消息', () => {
       { role: 'tool', tool_call_id: '1', content: 'result' }
     ]
   };
-  const result = R.injectChat(body, { seed: MARK });
+  const result = R.injectChat(body, { seed: MARK, toolStepReseed: false, contentFill: 'off', toolStepAnchor: true, nearestGuidance: 'off', sanitizeProgram: false });
   assert.equal(result.anchorInjected, true);
   assert.equal(result.seedInjected, false);
   assert.equal(body.messages.length, 4);
+  assert.equal(body.messages[2].content, '');
   assert.match(body.messages[2].reasoning_content, /^step plan/);
   assert.match(body.messages[2].reasoning_content, /Need continue from the tool result/);
-  assert.match(body.messages[2].reasoning_content, /We need test the register/);
+});
+
+test('chat: 多条 system 消息时将 SYSTEM_REGISTER 追加到最后一条连续 system 末尾', () => {
+  const body = {
+    messages: [
+      { role: 'system', content: 'Base system' },
+      { role: 'system', content: 'Detailed instructions for the user' },
+      { role: 'user', content: 'go' }
+    ]
+  };
+  R.injectChat(body, { seed: MARK });
+  assert.equal(body.messages[0].content, 'Base system');
+  assert.match(body.messages[1].content, /Detailed instructions for the requester/);
+  assert.match(body.messages[1].content, /We need use the earlier WeNeed trace/);
 });
 
 test('chat: team 模式追加外发规则到委派类工具描述', () => {
